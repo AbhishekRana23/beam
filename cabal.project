@@ -1,6 +1,9 @@
 packages:
   beam-core
   beam-migrate
-  beam-migrate-cli
   beam-postgres
+  beam-postgres/examples
   beam-sqlite
+
+-- Required to build testcontainers with ghc-9.10+
+allow-newer: aeson-optics:base

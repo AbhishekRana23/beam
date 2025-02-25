@@ -198,95 +198,24 @@ aggregate_ (\c -> ( group_ (addressPostalCode (customerAddress c))
 
 ### ON CONFLICT
 
-Beam supports `ON CONFLICT` statements in a Postgres-specific version of
-`insert`. The code below uses the following imports to ensure the correct `insert` is used:
+Postgres supports targeting a particular constraint as the target of an `ON CONFLICT` clause. You
+can use `conflictingConstraint` with the name of the constraint with the regular `insertOnConflict`
+function to use this functionality.
 
-```haskell
-import Database.Beam hiding (insert)
-import qualified Database.Beam.Postgres as Pg
-```
-
-The 3rd argument of the `insert` from `Database.Beam.Postgres` allows
-you to specify an `ON CONFLICT` clause. You can use
-`onConflictDefault` in order to recover the standard behavior.
-
-```haskell
-insert :: DatabaseEntity Postgres db (TableEntity table)
-       -> SqlInsertValues PgInsertValuesSyntax table
-       -> PgInsertOnConflict table
-       -> SqlInsert PgInsertSyntax
-```
-
-An explicit `ON CONFLICT` statement requires to specify the indexes
-which are conflicting and an action to take when a conflict is
-discovered. The `onConflict` function allows you to specify these
-parts of the `ON CONFLICT` clause.
-
-```haskell
-onConflict :: Beamable tbl
-           => PgInsertOnConflictTarget tbl
-           -> PgConflictAction tbl
-           -> PgInsertOnConflict tbl
-```
-
-#### Acting on any conflict
-
-The `anyConflict` value causes the action to be executed when any
-index or constraint is violated by the specified `INSERT`. The
-following example causes any conflicting update to be ignored. This
-could be useful if you want to upsert rows into a database.
+For example, to update the row, only on conflicts relating to the `"PK_CUSTOMER"` constraint.
 
 !beam-query
 ```haskell
 !example chinookdml only:Postgres
--- import qualified Database.Beam.Postgres as Pg
+--! import Database.Beam.Backend.SQL.BeamExtensions (BeamHasInsertOnConflict(..))
+--! import qualified Database.Beam.Postgres as Pg
 let
   newCustomer = Customer 42 "John" "Doe" Nothing (Address (Just "Street") (Just "City") (Just "State") Nothing Nothing) Nothing Nothing "john.doe@johndoe.com" nothing_
 
 runInsert $
-  Pg.insert (customer chinookDb) (insertValues [newCustomer]) $
-    Pg.onConflict
-      Pg.anyConflict
-      Pg.onConflictDoNothing
-```
-
-#### Acting only on certain conflicts
-
-Sometimes you only want to perform an action if a certain constraint
-is violated.  If the conflicting index or constraint is on a field,
-you can specify the fields with the function `conflictingFields`.
-
-!beam-query
-```haskell
-!example chinookdml only:Postgres
--- import qualified Database.Beam.Postgres as Pg
-let
-  newCustomer = Customer 42 "John" "Doe" Nothing (Address (Just "Street") (Just "City") (Just "State") Nothing Nothing) Nothing Nothing "john.doe@johndoe.com" nothing_
-
-runInsert $
-  Pg.insert (customer chinookDb) (insertValues [newCustomer]) $
-    Pg.onConflict
-      (Pg.conflictingFields primaryKey)
-      Pg.onConflictSetAll
-```
-
-!!! tip "Tip"
-    To specify a conflict on the primary keys, use `conflictingField primaryKey`.
-
-If the conflict target is an index, use `conflictingConstraint`, and supply the name of the constraint
-
-!beam-query
-```haskell
-!example chinookdml only:Postgres
--- import qualified Database.Beam.Postgres as Pg
-let
-  newCustomer = Customer 42 "John" "Doe" Nothing (Address (Just "Street") (Just "City") (Just "State") Nothing Nothing) Nothing Nothing "john.doe@johndoe.com" nothing_
-
-runInsert $
-  Pg.insert (customer chinookDb) (insertValues [newCustomer]) $
-    Pg.onConflict
-      (Pg.conflictingConstraint "PK_Customer")
-      Pg.onConflictSetAll
+  insertOnConflict (customer chinookDb) (insertValues [newCustomer])
+    (Pg.conflictingConstraint "PK_Customer")
+    (onConflictUpdateSet (\fields _ -> fields <-. val_ newCustomer))
 ```
 
 #### Specifying actions
@@ -345,3 +274,57 @@ runInsert $
       )
 ```
 
+### Inner CTEs
+
+Standard SQL only allows CTEs (`WITH` expressions) at the top-level SELECT. However, PostgreSQL
+allows them anywhere, including in subqueries for joins.
+
+For example, the following is valid Postgres, but not valid standard SQL.
+
+```sql
+SELECT a.column1, b.column2
+FROM (WITH RECURSIVE ... SELECT ...) a
+INNER JOIN b
+```
+
+`beam-core` enforces this by forcing `selectWith` to only return a `SqlSelect`, which represents a
+top-level SQL `SELECT` statement that can be executed against a backend. However, if we want to
+allow `WITH` expressions to appear within joins, then we will need a function similar to
+`selectWith` but returning a `Q` value, which is a re-usable query. `beam-postgres` provides this
+function for PostgreSQL, named `pgSelectWith`. For `beam-postgres`, `select (pgSelectWith x)` is
+equivalent to `selectWith x`. But, with the new type, we can reuse CTEs (including recursive ones)
+within other queries.
+
+As an example using our Chinook schema, suppose we had an error with all orders in the month of
+September 2024, and needed to send out employees to customer homes to correct the issue. We want to
+find, for each order, an employee who lives in the same city as the customer, but we only want the
+highest ranking employee for each customer.
+
+First, we order the employees by org structure so that managers appear first, followed by direct reports. We use a recursive query for this, and then join it against the orders.
+
+!beam-query
+```haskell
+!example chinook only:Postgres
+aggregate_ (\(cust, emp) -> (group_ cust, Pg.pgArrayAgg (employeeId emp)))
+     $ do inv <- filter_ (\i -> invoiceDate i >=. val_ (read "2024-09-01 00:00:00.000000")  &&. invoiceDate i <=. val_ (read "2024-10-01 00:00:00.000000")) $ all_ (invoice chinookDb)
+          cust <- lookup_ (customer chinookDb) (invoiceCustomer inv)
+          -- Lookup all employees and their levels
+          (employee, _, _) <-
+            Pg.pgSelectWith $ do
+              let topLevelEmployees =
+                    fmap (\e -> (e, val_ (via @Int32 0))) $
+                    filter_ (\e -> isNull_ (employeeReportsTo e)) $ all_ (employee chinookDb)
+              rec employeeOrgChart <-
+                    selecting (topLevelEmployees `unionAll_`
+                               do { (manager, managerLevel) <- reuse employeeOrgChart
+                                  ; report <- filter_ (\e -> employeeReportsTo e ==. manager) $ all_ (employee chinookDb)
+                                  ; pure (report, managerLevel + val_ 1) })
+              pure $ filter_ (\(employee, level, minLevel) -> level ==. minLevel)
+                   $ withWindow_ (\(employee, level) -> frame_ (partitionBy_ (addressCity (employeeAddress employee))) noOrder_ noBounds_)
+                                 (\(employee, level) cityFrame ->
+                                   (employee, level, coalesce_ [min_ level `over_` cityFrame] (val_ 0)))
+                                 (reuse employeeOrgChart)
+          -- Limit the search only to employees that live in the same city
+          guard_ (addressCity (employeeAddress employee) ==. addressCity (customerAddress cust))
+          pure (cust, employee)
+```

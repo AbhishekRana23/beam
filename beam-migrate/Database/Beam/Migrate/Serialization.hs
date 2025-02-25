@@ -39,16 +39,15 @@ import           Control.Applicative
 import           Control.Monad
 
 import           Data.Aeson
-import qualified Data.Aeson.Key as AKey
+#if MIN_VERSION_aeson(2,0,0)
+import qualified Data.Aeson.Key as DAK
+#endif
 import           Data.Aeson.Types (Parser)
 import qualified Data.Dependent.Map as D
 import qualified Data.GADT.Compare as D
 import           Data.Text (Text, unpack)
 import           Data.Typeable (Typeable, (:~:)( Refl ), eqT, typeRep, typeOf)
 import qualified Data.Vector as V
-#if !MIN_VERSION_base(4, 11, 0)
-import           Data.Semigroup
-#endif
 
 -- * Serialization helpers
 
@@ -244,21 +243,19 @@ newtype BeamDeserializers be
   }
 
 instance Semigroup (BeamDeserializer be) where
-  (<>) = mappend
-
-instance Monoid (BeamDeserializer be) where
-  mempty = BeamDeserializer (const (const mzero))
-  mappend (BeamDeserializer a) (BeamDeserializer b) =
+  (BeamDeserializer a) <> (BeamDeserializer b) =
     BeamDeserializer $ \d o ->
     a d o <|> b d o
 
+instance Monoid (BeamDeserializer be) where
+  mempty = BeamDeserializer (const (const mzero))
+
 instance Semigroup (BeamDeserializers be) where
-  (<>) = mappend
+  (BeamDeserializers a) <> (BeamDeserializers b) =
+    BeamDeserializers (D.unionWithKey (const mappend) a b)
 
 instance Monoid (BeamDeserializers be) where
   mempty = BeamDeserializers mempty
-  mappend (BeamDeserializers a) (BeamDeserializers b) =
-    BeamDeserializers (D.unionWithKey (const mappend) a b)
 
 -- | Helper function to deserialize data from a 'Maybe' 'Value'.
 --
@@ -322,8 +319,13 @@ sql92Deserializers = mconcat
                    , beamDeserializer deserializeSql92ReferentialAction
                    , beamDeserializer deserializeSql92Attributes ]
   where
+#if MIN_VERSION_aeson(2,0,0)
+    makeKey = DAK.fromText
+#else
+    makeKey = id
+#endif
     parseSub nm o key parse =
-      withObject (unpack (nm <> "." <> key)) parse =<< o .: (AKey.fromText key)
+      withObject (unpack (nm <> "." <> key)) parse =<< o .: makeKey key
 
     deserializeSql92DataType :: BeamDeserializers be' -> Value
                              -> Parser (BeamSqlBackendDataTypeSyntax be)

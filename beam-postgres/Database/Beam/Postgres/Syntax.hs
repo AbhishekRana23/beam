@@ -11,6 +11,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | Data types for Postgres syntax. Access is given mainly for extension
 -- modules. The types and definitions here are likely to change.
@@ -86,9 +87,9 @@ module Database.Beam.Postgres.Syntax
     , PostgresInaccessible ) where
 
 import           Database.Beam hiding (insert)
+import           Database.Beam.Backend.Internal.Compat
 import           Database.Beam.Backend.SQL
 import           Database.Beam.Migrate
-import           Database.Beam.Migrate.Checks (HasDataTypeCreatedCheck(..))
 import           Database.Beam.Migrate.SQL.Builder hiding (fromSqlConstraintAttributes)
 import           Database.Beam.Migrate.Serialization
 
@@ -99,7 +100,7 @@ import           Control.Monad.Free.Church
 import           Data.Aeson (Value, object, (.=))
 import           Data.Bits
 import           Data.ByteString (ByteString)
-import           Data.ByteString.Builder (Builder, byteString, char8, toLazyByteString)
+import           Data.ByteString.Builder (Builder, doubleDec, floatDec, byteString, char8, toLazyByteString)
 import qualified Data.ByteString.Char8 as B
 import           Data.ByteString.Lazy.Char8 (toStrict)
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -110,18 +111,16 @@ import           Data.Functor.Classes
 import           Data.Hashable
 import           Data.Int
 import           Data.Maybe
-#if !MIN_VERSION_base(4, 11, 0)
-import           Data.Semigroup
-#endif
 import           Data.Scientific (Scientific)
 import           Data.String (IsString(..), fromString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as TL
 import           Data.Time (LocalTime, UTCTime, TimeOfDay, NominalDiffTime, Day)
-import           Data.UUID.Types (UUID)
+import           Data.UUID.Types (UUID, toASCIIBytes)
 import           Data.Word
 import qualified Data.Vector as V
+import           GHC.TypeLits
 
 import qualified Database.PostgreSQL.Simple.ToField as Pg
 import qualified Database.PostgreSQL.Simple.TypeInfo.Static as Pg
@@ -249,6 +248,7 @@ newtype PgExpressionSyntax = PgExpressionSyntax { fromPgExpression :: PgSyntax }
 newtype PgAggregationSetQuantifierSyntax = PgAggregationSetQuantifierSyntax { fromPgAggregationSetQuantifier :: PgSyntax }
 newtype PgSelectSetQuantifierSyntax = PgSelectSetQuantifierSyntax { fromPgSelectSetQuantifier :: PgSyntax }
 newtype PgFromSyntax = PgFromSyntax { fromPgFrom :: PgSyntax }
+newtype PgSchemaNameSyntax = PgSchemaNameSyntax { fromPgSchemaName :: PgSyntax }
 newtype PgTableNameSyntax = PgTableNameSyntax { fromPgTableName :: PgSyntax }
 newtype PgComparisonQuantifierSyntax = PgComparisonQuantifierSyntax { fromPgComparisonQuantifier :: PgSyntax }
 newtype PgExtractFieldSyntax = PgExtractFieldSyntax { fromPgExtractField :: PgSyntax }
@@ -333,6 +333,9 @@ instance Hashable PgDataTypeDescr where
   hashWithSalt salt (PgDataTypeDescrDomain t) =
     hashWithSalt salt (1 :: Int, t)
 
+newtype PgCreateSchemaSyntax = PgCreateSchemaSyntax { fromPgCreateSchema :: PgSyntax }
+newtype PgDropSchemaSyntax = PgDropSchemaSyntax { fromPgDropSchema :: PgSyntax }
+
 newtype PgCreateTableSyntax = PgCreateTableSyntax { fromPgCreateTable :: PgSyntax }
 data PgTableOptionsSyntax = PgTableOptionsSyntax PgSyntax PgSyntax
 newtype PgColumnSchemaSyntax = PgColumnSchemaSyntax { fromPgColumnSchema :: PgSyntax } deriving (Show, Eq)
@@ -408,6 +411,13 @@ instance IsSql92Syntax PgCommandSyntax where
   deleteCmd = PgCommandSyntax PgCommandTypeDataUpdate . coerce
   updateCmd = PgCommandSyntax PgCommandTypeDataUpdate . coerce
 
+instance IsSql92DdlSchemaCommandSyntax PgCommandSyntax where
+  type Sql92DdlCommandCreateSchemaSyntax PgCommandSyntax = PgCreateSchemaSyntax
+  type Sql92DdlCommandDropSchemaSyntax PgCommandSyntax = PgDropSchemaSyntax
+
+  createSchemaCmd = PgCommandSyntax PgCommandTypeDdl . coerce
+  dropSchemaCmd = PgCommandSyntax PgCommandTypeDdl . coerce
+
 instance IsSql92DdlCommandSyntax PgCommandSyntax where
   type Sql92DdlCommandCreateTableSyntax PgCommandSyntax = PgCreateTableSyntax
   type Sql92DdlCommandDropTableSyntax PgCommandSyntax = PgDropTableSyntax
@@ -416,6 +426,9 @@ instance IsSql92DdlCommandSyntax PgCommandSyntax where
   createTableCmd = PgCommandSyntax PgCommandTypeDdl . coerce
   dropTableCmd   = PgCommandSyntax PgCommandTypeDdl . coerce
   alterTableCmd  = PgCommandSyntax PgCommandTypeDdl . coerce
+
+instance IsSql92SchemaNameSyntax PgSchemaNameSyntax where
+  schemaName s = PgSchemaNameSyntax (pgQuotedIdentifier s)
 
 instance IsSql92TableNameSyntax PgTableNameSyntax where
   tableName Nothing t = PgTableNameSyntax (pgQuotedIdentifier t)
@@ -542,7 +555,7 @@ instance IsSql92DataTypeSyntax PgDataTypeSyntax where
                                       (emit "NUMERIC" <> pgOptNumericPrec prec)
                                       (numericType prec)
   decimalType prec = PgDataTypeSyntax (PgDataTypeDescrOid (Pg.typoid Pg.numeric) (mkNumericPrec prec))
-                                      (emit "DOUBLE" <> pgOptNumericPrec prec)
+                                      (emit "DECIMAL" <> pgOptNumericPrec prec)
                                       (decimalType prec)
 
   intType = PgDataTypeSyntax (PgDataTypeDescrOid (Pg.typoid Pg.int4) Nothing) (emit "INT") intType
@@ -565,8 +578,8 @@ instance IsSql99DataTypeSyntax PgDataTypeSyntax where
   binaryLargeObjectType = pgByteaType { pgDataTypeSerialized = binaryLargeObjectType }
   booleanType = PgDataTypeSyntax (PgDataTypeDescrOid (Pg.typoid Pg.bool) Nothing) (emit "BOOLEAN")
                                  booleanType
-  arrayType (PgDataTypeSyntax _ syntax serialized) sz =
-    PgDataTypeSyntax (error "TODO: array migrations")
+  arrayType (PgDataTypeSyntax descr syntax serialized) sz =
+    PgDataTypeSyntax (PgDataTypeDescrOid (fromMaybe (error "Unsupported array type") (arrayTypeDescr descr)) Nothing)
                      (syntax <> emit "[" <> emit (fromString (show sz)) <> emit "]")
                      (arrayType serialized sz)
   rowType = error "rowType"
@@ -632,11 +645,72 @@ pgLineType = PgDataTypeSyntax (PgDataTypeDescrOid (Pg.typoid Pg.line) Nothing) (
 pgLineSegmentType = PgDataTypeSyntax (PgDataTypeDescrOid (Pg.typoid Pg.lseg) Nothing) (emit "LSEG") (pgDataTypeJSON "lseg")
 pgBoxType = PgDataTypeSyntax (PgDataTypeDescrOid (Pg.typoid Pg.box) Nothing) (emit "BOX") (pgDataTypeJSON "box")
 
+-- TODO: better mechanism to tell, at compile time, that some type
+-- cannot be placed in an array
 pgUnboundedArrayType :: PgDataTypeSyntax -> PgDataTypeSyntax
-pgUnboundedArrayType (PgDataTypeSyntax _ syntax serialized) =
-    PgDataTypeSyntax (error "Can't do array migrations yet")
+pgUnboundedArrayType (PgDataTypeSyntax descr syntax serialized) =
+    PgDataTypeSyntax (PgDataTypeDescrOid (fromMaybe (error "Unsupported array type") (arrayTypeDescr descr)) Nothing)
                      (syntax <> emit "[]")
                      (pgDataTypeJSON (object [ "unbounded-array" .= fromBeamSerializedDataType serialized ]))
+
+-- TODO: define CPP macro to make sure the left hand side (e.g. `Pg.recordOid`) 
+--       always matches right hand side (e.g. `Pg.array_recordOid)
+
+-- | Get the Oid of Pg arrays which contains elements of a certain type
+arrayTypeDescr :: PgDataTypeDescr -> Maybe Pg.Oid
+arrayTypeDescr (PgDataTypeDescrDomain _) = Nothing
+arrayTypeDescr (PgDataTypeDescrOid elemOid _)
+  | elemOid == Pg.recordOid    = Just $ Pg.array_recordOid
+  | elemOid == Pg.xmlOid    = Just $ Pg.array_xmlOid
+  | elemOid == Pg.jsonOid   = Just $ Pg.array_jsonOid
+  | elemOid == Pg.lineOid   = Just $ Pg.array_lineOid
+  | elemOid == Pg.cidrOid   = Just $ Pg.array_cidOid
+  | elemOid == Pg.circleOid = Just $ Pg.array_circleOid
+  | elemOid == Pg.moneyOid  = Just $ Pg.array_moneyOid
+  | elemOid == Pg.boolOid   = Just $ Pg.array_boolOid
+  | elemOid == Pg.byteaOid  = Just $ Pg.array_byteaOid
+  | elemOid == Pg.charOid   = Just $ Pg.array_charOid
+  | elemOid == Pg.nameOid   = Just $ Pg.array_nameOid
+  | elemOid == Pg.int2Oid   = Just $ Pg.array_int2Oid
+  | elemOid == Pg.int2vectorOid = Just $ Pg.array_int2vectorOid
+  | elemOid == Pg.int4Oid   = Just $ Pg.array_int4Oid
+  | elemOid == Pg.regprocOid = Just $ Pg.array_regprocOid
+  | elemOid == Pg.textOid   = Just $ Pg.array_textOid
+  | elemOid == Pg.tidOid   = Just $ Pg.array_tidOid
+  | elemOid == Pg.xidOid   = Just $ Pg.array_xidOid
+  | elemOid == Pg.cidOid   = Just $ Pg.array_cidOid
+  | elemOid == Pg.bpcharOid = Just $ Pg.array_bpcharOid
+  | elemOid == Pg.varcharOid = Just $ Pg.array_varcharOid
+  | elemOid == Pg.int8Oid = Just $ Pg.array_int8Oid
+  | elemOid == Pg.pointOid = Just $ Pg.array_pointOid
+  | elemOid == Pg.lsegOid = Just $ Pg.array_lsegOid
+  | elemOid == Pg.pathOid = Just $ Pg.array_pathOid
+  | elemOid == Pg.boxOid = Just $ Pg.array_boxOid
+  | elemOid == Pg.float4Oid = Just $ Pg.array_float4Oid
+  | elemOid == Pg.float8Oid = Just $ Pg.array_float8Oid
+  | elemOid == Pg.polygonOid = Just $ Pg.array_polygonOid
+  | elemOid == Pg.oidOid = Just $ Pg.array_oidOid
+  | elemOid == Pg.macaddrOid = Just $ Pg.array_macaddrOid
+  | elemOid == Pg.inetOid = Just $ Pg.array_inetOid
+  | elemOid == Pg.timestampOid = Just $ Pg.array_timestampOid
+  | elemOid == Pg.dateOid = Just $ Pg.array_dateOid
+  | elemOid == Pg.timeOid = Just $ Pg.array_timeOid
+  | elemOid == Pg.timestamptzOid = Just $ Pg.array_timestamptzOid
+  | elemOid == Pg.intervalOid = Just $ Pg.array_intervalOid
+  | elemOid == Pg.numericOid = Just $ Pg.array_numericOid
+  | elemOid == Pg.timetzOid = Just $ Pg.array_timetzOid
+  | elemOid == Pg.bitOid = Just $ Pg.array_bitOid
+  | elemOid == Pg.varbitOid = Just $ Pg.array_varbitOid
+  | elemOid == Pg.refcursorOid = Just $ Pg.array_refcursorOid
+  | elemOid == Pg.regprocedureOid = Just $ Pg.array_regprocedureOid
+  | elemOid == Pg.regoperOid = Just $ Pg.array_regoperOid
+  | elemOid == Pg.regoperatorOid = Just $ Pg.array_regoperatorOid
+  | elemOid == Pg.regclassOid = Just $ Pg.array_regclassOid
+  | elemOid == Pg.regtypeOid = Just $ Pg.array_regtypeOid
+  | elemOid == Pg.uuidOid = Just $ Pg.array_uuidOid
+  | elemOid == Pg.jsonbOid = Just $ Pg.array_jsonbOid
+  | otherwise = Nothing
+
 
 pgTsQueryTypeInfo :: Pg.TypeInfo
 pgTsQueryTypeInfo = Pg.Basic (Pg.Oid 3615) 'U' ',' "tsquery"
@@ -680,12 +754,9 @@ instance IsSql92AggregationIndexHintsSyntax PgExpressionSyntax where
 instance IsCustomSqlSyntax PgExpressionSyntax where
   newtype CustomSqlSyntax PgExpressionSyntax =
     PgCustomExpressionSyntax { fromPgCustomExpression :: PgSyntax }
-    deriving Monoid
+    deriving (Semigroup, Monoid)
   customExprSyntax = PgExpressionSyntax . fromPgCustomExpression
   renderSyntax = PgCustomExpressionSyntax . pgParens . fromPgExpression
-
-instance Semigroup (CustomSqlSyntax PgExpressionSyntax) where
-  (<>) = mappend
 
 instance IsString (CustomSqlSyntax PgExpressionSyntax) where
   fromString = PgCustomExpressionSyntax . emit . fromString
@@ -777,6 +848,8 @@ instance IsSql92ExpressionSyntax PgExpressionSyntax where
 
   inE e es = PgExpressionSyntax $ pgParens (fromPgExpression e) <> emit " IN " <>
                                   pgParens (pgSepBy (emit ", ") (map fromPgExpression es))
+  inSelectE e sel = PgExpressionSyntax $ pgParens (fromPgExpression e) <> emit " IN " <>
+                                         pgParens (fromPgSelect sel)
 
 instance IsSql99FunctionExpressionSyntax PgExpressionSyntax where
   functionCallE name args =
@@ -924,8 +997,8 @@ instance IsSql99AggregationExpressionSyntax PgExpressionSyntax where
 
   -- According to the note at <https://www.postgresql.org/docs/9.2/static/functions-aggregate.html>
   -- the following functions are equivalent.
-  someE = pgUnAgg "BOOL_ANY"
-  anyE = pgUnAgg "BOOL_ANY"
+  someE = pgUnAgg "BOOL_OR"
+  anyE = pgUnAgg "BOOL_OR"
 
 instance IsSql92AggregationSetQuantifierSyntax PgAggregationSetQuantifierSyntax where
   setQuantifierDistinct = PgAggregationSetQuantifierSyntax $ emit "DISTINCT"
@@ -1044,6 +1117,18 @@ instance IsSql92AlterTableActionSyntax PgAlterTableActionSyntax where
 instance IsSql92AlterColumnActionSyntax PgAlterColumnActionSyntax where
   setNullSyntax = PgAlterColumnActionSyntax (emit "DROP NOT NULL")
   setNotNullSyntax = PgAlterColumnActionSyntax (emit "SET NOT NULL")
+
+instance IsSql92SchemaNameSyntax PgSchemaNameSyntax => IsSql92CreateSchemaSyntax PgCreateSchemaSyntax where
+  type Sql92CreateSchemaSchemaNameSyntax PgCreateSchemaSyntax = PgSchemaNameSyntax
+
+  createSchemaSyntax schemaName = PgCreateSchemaSyntax $
+    emit "CREATE SCHEMA " <> fromPgSchemaName schemaName
+
+instance IsSql92SchemaNameSyntax PgSchemaNameSyntax => IsSql92DropSchemaSyntax PgDropSchemaSyntax where
+  type Sql92DropSchemaSchemaNameSyntax PgDropSchemaSyntax = PgSchemaNameSyntax
+
+  dropSchemaSyntax schemaName = PgDropSchemaSyntax $
+    emit "DROP SCHEMA " <> fromPgSchemaName schemaName
 
 instance IsSql92CreateTableSyntax PgCreateTableSyntax where
   type Sql92CreateTableTableNameSyntax PgCreateTableSyntax = PgTableNameSyntax
@@ -1180,15 +1265,11 @@ instance DatabasePredicate PgHasEnum where
              sqlValueSyntax = defaultPgValueSyntax
 
 DEFAULT_SQL_SYNTAX(Bool)
-DEFAULT_SQL_SYNTAX(Double)
-DEFAULT_SQL_SYNTAX(Float)
-DEFAULT_SQL_SYNTAX(Int)
 DEFAULT_SQL_SYNTAX(Int8)
 DEFAULT_SQL_SYNTAX(Int16)
 DEFAULT_SQL_SYNTAX(Int32)
 DEFAULT_SQL_SYNTAX(Int64)
 DEFAULT_SQL_SYNTAX(Integer)
-DEFAULT_SQL_SYNTAX(Word)
 DEFAULT_SQL_SYNTAX(Word8)
 DEFAULT_SQL_SYNTAX(Word16)
 DEFAULT_SQL_SYNTAX(Word32)
@@ -1202,7 +1283,6 @@ DEFAULT_SQL_SYNTAX(UTCTime)
 DEFAULT_SQL_SYNTAX(TimeOfDay)
 DEFAULT_SQL_SYNTAX(NominalDiffTime)
 DEFAULT_SQL_SYNTAX(Day)
-DEFAULT_SQL_SYNTAX(UUID)
 DEFAULT_SQL_SYNTAX([Char])
 DEFAULT_SQL_SYNTAX(Pg.HStoreMap)
 DEFAULT_SQL_SYNTAX(Pg.HStoreList)
@@ -1211,6 +1291,21 @@ DEFAULT_SQL_SYNTAX(Pg.Date)
 DEFAULT_SQL_SYNTAX(Pg.LocalTimestamp)
 DEFAULT_SQL_SYNTAX(Pg.UTCTimestamp)
 DEFAULT_SQL_SYNTAX(Scientific)
+
+-- We have a 'manual' instance for Double and Float because the default value of a
+-- literal like "1.0" is NUMERIC, not DOUBLE. However, NUMERIC values are exact, 
+-- while DOUBLEs are inexact. This means that converting from SQL NUMERIC
+-- to Haskell Double is lossy.
+-- See #700
+instance HasSqlValueSyntax PgValueSyntax Float where
+  sqlValueSyntax v 
+    | isNaN v || isInfinite v = PgValueSyntax $ emit "'" <> emitBuilder (floatDec v) <> emit "'"
+    | otherwise               = PgValueSyntax $ emit "'" <> emitBuilder (floatDec v) <> emit "'::double precision"
+
+instance HasSqlValueSyntax PgValueSyntax Double where
+  sqlValueSyntax v 
+    | isNaN v || isInfinite v = PgValueSyntax $ emit "'" <> emitBuilder (doubleDec v) <> emit "'"
+    | otherwise               = PgValueSyntax $ emit "'" <> emitBuilder (doubleDec v) <> emit "'::double precision"
 
 instance HasSqlValueSyntax PgValueSyntax (CI T.Text) where
   sqlValueSyntax = sqlValueSyntax . CI.original
@@ -1230,7 +1325,19 @@ instance HasSqlValueSyntax PgValueSyntax B.ByteString where
 instance HasSqlValueSyntax PgValueSyntax BL.ByteString where
   sqlValueSyntax = defaultPgValueSyntax . Pg.Binary
 
+-- This should be removed in favor of the default syntax if/when
+-- https://github.com/lpsmith/postgresql-simple/issues/277 is fixed upstream.
+instance HasSqlValueSyntax PgValueSyntax UUID where
+  sqlValueSyntax v = PgValueSyntax $
+    emit "'" <> emit (toASCIIBytes v) <> emit "'::uuid"
+
 instance Pg.ToField a => HasSqlValueSyntax PgValueSyntax (V.Vector a) where
+  sqlValueSyntax = defaultPgValueSyntax
+
+instance TypeError (PreferExplicitSize Int Int32) => HasSqlValueSyntax PgValueSyntax Int where
+  sqlValueSyntax = defaultPgValueSyntax
+
+instance TypeError (PreferExplicitSize Word Word32) => HasSqlValueSyntax PgValueSyntax Word where
   sqlValueSyntax = defaultPgValueSyntax
 
 pgQuotedIdentifier :: T.Text -> PgSyntax

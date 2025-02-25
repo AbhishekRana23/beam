@@ -23,15 +23,13 @@ import           Database.Beam.Migrate.Serialization
 
 import           Data.Char (toLower, toUpper)
 import           Data.Hashable
+import           Data.Int
 import           Data.List (find, nub)
 import qualified Data.Map as M
 import           Data.Maybe
 import qualified Data.Set as S
 import           Data.String
 import qualified Data.Text as T
-#if !MIN_VERSION_base(4, 11, 0)
-import           Data.Semigroup
-#endif
 
 import qualified Language.Haskell.Exts as Hs
 
@@ -53,13 +51,12 @@ data HsImport = HsImportAll | HsImportSome (S.Set (Hs.ImportSpec ()))
   deriving (Show, Eq, Generic)
 instance Hashable HsImport
 instance Semigroup HsImport where
-  (<>) = mappend
+  HsImportAll <> _ = HsImportAll
+  _ <> HsImportAll = HsImportAll
+  (HsImportSome a) <> (HsImportSome b) =
+    HsImportSome (a <> b)
 instance Monoid HsImport where
   mempty = HsImportSome mempty
-  mappend HsImportAll _ = HsImportAll
-  mappend _ HsImportAll = HsImportAll
-  mappend (HsImportSome a) (HsImportSome b) =
-    HsImportSome (a <> b)
 
 importSome :: T.Text -> [ Hs.ImportSpec () ] -> HsImports
 importSome modNm names = HsImports (M.singleton (Hs.ModuleName () (T.unpack modNm))
@@ -76,11 +73,10 @@ newtype HsImports = HsImports (M.Map (Hs.ModuleName ()) HsImport)
 instance Hashable HsImports where
   hashWithSalt s (HsImports a) = hashWithSalt s (M.assocs a)
 instance Semigroup HsImports where
-  (<>) = mappend
+  (HsImports a) <> (HsImports b) =
+      HsImports (M.unionWith mappend a b)
 instance Monoid HsImports where
   mempty = HsImports mempty
-  mappend (HsImports a) (HsImports b) =
-    HsImports (M.unionWith mappend a b)
 
 data HsDataType
   = HsDataType
@@ -139,11 +135,10 @@ data HsAction
   }
 
 instance Semigroup HsAction where
-  (<>) = mappend
+  (<>) (HsAction ma ea) (HsAction mb eb) =
+    HsAction (ma <> mb) (ea <> eb)
 instance Monoid HsAction where
   mempty = HsAction [] []
-  mappend (HsAction ma ea) (HsAction mb eb) =
-    HsAction (ma <> mb) (ea <> eb)
 
 newtype HsBackendConstraint = HsBackendConstraint { buildHsBackendConstraint :: Hs.Type () -> Hs.Asst () }
 
@@ -153,18 +148,17 @@ data HsBeamBackend f
   | HsBeamBackendNone
 
 instance Semigroup (HsBeamBackend f) where
-  (<>) = mappend
+  (<>) (HsBeamBackendSingle aTy aExp) (HsBeamBackendSingle bTy _)
+      | aTy == bTy = HsBeamBackendSingle aTy aExp
+      | otherwise = HsBeamBackendNone
+  (<>) a@HsBeamBackendSingle {} _ = a
+  (<>) _ b@HsBeamBackendSingle {} = b
+  (<>) HsBeamBackendNone _ = HsBeamBackendNone
+  (<>) _ HsBeamBackendNone = HsBeamBackendNone
+  (<>) (HsBeamBackendConstrained a) (HsBeamBackendConstrained b) =
+    HsBeamBackendConstrained (a <> b)
 instance Monoid (HsBeamBackend f) where
   mempty = HsBeamBackendConstrained []
-  mappend (HsBeamBackendSingle aTy aExp) (HsBeamBackendSingle bTy _)
-    | aTy == bTy = HsBeamBackendSingle aTy aExp
-    | otherwise = HsBeamBackendNone
-  mappend a@HsBeamBackendSingle {} _ = a
-  mappend _ b@HsBeamBackendSingle {} = b
-  mappend HsBeamBackendNone _ = HsBeamBackendNone
-  mappend _ HsBeamBackendNone = HsBeamBackendNone
-  mappend (HsBeamBackendConstrained a) (HsBeamBackendConstrained b) =
-    HsBeamBackendConstrained (a <> b)
 
 data HsEntity
     = HsEntity
@@ -188,12 +182,11 @@ data HsTableConstraintDecls
     }
 
 instance Semigroup HsTableConstraintDecls where
-  (<>) = mappend
+  (<>) (HsTableConstraintDecls ai ad) (HsTableConstraintDecls bi bd) =
+    HsTableConstraintDecls (ai <> bi) (ad <> bd)
 
 instance Monoid HsTableConstraintDecls where
   mempty = HsTableConstraintDecls [] []
-  mappend (HsTableConstraintDecls ai ad) (HsTableConstraintDecls bi bd) =
-    HsTableConstraintDecls (ai <> bi) (ad <> bd)
 
 data HsModule
   = HsModule
@@ -414,10 +407,9 @@ data HsNone = HsNone deriving (Show, Eq, Ord, Generic)
 instance Hashable HsNone
 
 instance Semigroup HsNone where
-  (<>) = mappend
+  (<>) _ _ = HsNone
 instance Monoid HsNone where
   mempty = HsNone
-  mappend _ _ = HsNone
 
 data HsMigrateBackend = HsMigrateBackend
 
@@ -436,9 +428,19 @@ hsMkTableName toNameCase (TableName sch nm) =
         [] -> error "Empty schema name"
         x:xs -> toNameCase x:xs ++ "_" ++ T.unpack nm
 
+hsSchemaName :: SchemaName -> String
+hsSchemaName (SchemaName nm) = T.unpack nm
+
 hsTableVarName, hsTableTypeName :: TableName -> String
 hsTableVarName = hsMkTableName toLower
 hsTableTypeName = hsMkTableName toUpper
+
+instance IsSql92DdlSchemaCommandSyntax HsAction where
+  type Sql92DdlCommandCreateSchemaSyntax HsAction = HsAction
+  type Sql92DdlCommandDropSchemaSyntax HsAction = HsAction
+
+  createSchemaCmd = id
+  dropSchemaCmd = id
 
 instance IsSql92DdlCommandSyntax HsAction where
   type Sql92DdlCommandCreateTableSyntax HsAction = HsAction
@@ -475,6 +477,20 @@ instance IsSql92DropTableSyntax HsAction where
   dropTableSyntax nm = HsAction [ (Nothing, dropTable) ] []
     where
       dropTable = hsApp (hsVar "dropTable") [ hsVar (fromString (hsTableVarName nm)) ]
+
+instance IsSql92CreateSchemaSyntax HsAction where
+  type Sql92CreateSchemaSchemaNameSyntax HsAction = SchemaName
+  createSchemaSyntax (SchemaName nm) = HsAction [ (Nothing, createSchema) ] []
+    where
+      createSchema = hsApp (hsVar "createDatabaseSchema") [ hsVar nm ]
+
+
+instance IsSql92DropSchemaSyntax HsAction where
+  type Sql92DropSchemaSchemaNameSyntax HsAction = SchemaName
+  dropSchemaSyntax (SchemaName nm) = HsAction [ (Nothing, dropSchema) ] []
+    where
+      dropSchema = hsApp (hsVar "dropDatabaseSchema") [ hsVar nm ]
+
 
 instance IsSql92CreateTableSyntax HsAction where
   type Sql92CreateTableTableNameSyntax HsAction = TableName
@@ -695,6 +711,7 @@ instance IsSql92ExpressionSyntax HsExpr where
   leE q a b = hsApp (hsVar "leE")   [hsMaybe q, a, b]
 
   inE a b = hsApp (hsVar "inE") [a, hsList b]
+  inSelectE _ _ = error "inSelectE"
 
 instance IsSql92QuantifierSyntax HsExpr where
   quantifyOverAll = hsVar "quantifyOverAll"
@@ -717,7 +734,7 @@ instance IsSql92ConstraintAttributesSyntax HsNone where
   notDeferrableAttributeSyntax = HsNone
   deferrableAttributeSyntax = HsNone
 
-instance HasSqlValueSyntax HsExpr Int where
+instance HasSqlValueSyntax HsExpr Int32 where
   sqlValueSyntax = hsInt
 instance HasSqlValueSyntax HsExpr Bool where
   sqlValueSyntax True = hsVar "True"

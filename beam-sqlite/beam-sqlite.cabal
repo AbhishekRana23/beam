@@ -1,5 +1,5 @@
 name:                beam-sqlite
-version:             0.5.0.0
+version:             0.5.4.0
 synopsis:            Beam driver for SQLite
 description:         Beam driver for the <https://sqlite.org/ SQLite> embedded database.
                      See <https://haskell-beam.github.io/beam/user-guide/backends/beam-sqlite/ here>
@@ -14,7 +14,7 @@ category:            Database
 build-type:          Simple
 extra-source-files:  README.md
 extra-doc-files:     ChangeLog.md
-bug-reports:          https://github.com/tathougies/beam/issues
+bug-reports:          https://github.com/haskell-beam/beam/issues
 cabal-version:       1.18
 
 library
@@ -23,35 +23,78 @@ library
                       Database.Beam.Sqlite.Connection
                       Database.Beam.Sqlite.Migrate
   other-modules:      Database.Beam.Sqlite.SqliteSpecific
-  build-depends:      base          ,
-                      beam-core     ,
-                      beam-migrate  ,
-                      sqlite-simple ,
-                      text          ,
-                      bytestring    ,
-                      hashable      ,
-                      time          ,
-                      dlist         ,
-                      mtl           ,
-                      free          ,
-                      scientific    ,
-                      network-uri   ,
-                      aeson         ,
-                      attoparsec
+  build-depends:      base          >=4.11 && <5,
+
+                      beam-core     >=0.10 && <0.11,
+                      beam-migrate  >=0.5  && <0.6,
+
+                      sqlite-simple >=0.4  && <0.5,
+                      text          >=1.0  && <2.2,
+                      bytestring    >=0.10 && <0.13,
+                      hashable      >=1.2  && <1.6,
+                      time          >=1.6  && <1.13,
+                      dlist         >=0.8  && <1.1,
+                      mtl           >=2.1  && <2.4,
+                      free          >=4.12 && <5.3,
+                      scientific    >=0.3  && <0.4,
+                      monad-control        >=1.0  && <1.1,
+                      network-uri   >=2.6  && <2.7,
+                      aeson         >=0.11 && <2.3,
+                      attoparsec    >=0.13 && <0.15,
+                      transformers-base    >=0.4  && <0.5,
+                      -- Dependency on direct-sqlite is not direct,
+                      -- but functionality in beam-sqlite depends on
+                      -- a minimum version of sqlite. At this time,
+                      -- we require at least sqlite-3.24.
+                      -- Note that because of this, we cannot use the 
+                      -- `Wunused-packages` warning.
+                      -- See #589
+                      direct-sqlite >=2.3.24
   default-language:   Haskell2010
   default-extensions: ScopedTypeVariables, OverloadedStrings, MultiParamTypeClasses, RankNTypes, FlexibleInstances,
                       DeriveDataTypeable, DeriveGeneric, StandaloneDeriving, TypeFamilies, GADTs, OverloadedStrings,
-                      CPP, TypeApplications, FlexibleContexts, ConstraintKinds
+                      CPP, TypeApplications, FlexibleContexts, ConstraintKinds, DerivingStrategies
   ghc-options:        -Wall
+                      -Widentities
+                      -Wincomplete-uni-patterns
+                      -Wincomplete-record-updates
   if flag(werror)
-    ghc-options:       -Werror
+    ghc-options: -Werror
 
-  if os(windows)
-    cpp-options:      -DWINDOWS
-    build-depends:    Win32         >=2.4 && <2.8
-  if os(freebsd) || os(netbsd) || os(openbsd) || os(darwin) || os(linux) || os(solaris) || os(android)
-    cpp-options:      -DUNIX
-    build-depends:    unix          >=2.0 && <2.8
+test-suite beam-sqlite-tests
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  build-depends:
+    base,
+    beam-core,
+    beam-migrate,
+    beam-sqlite,
+    sqlite-simple,
+    tasty,
+    tasty-expected-failure,
+    tasty-hunit,
+    text,
+    time
+  other-modules:
+    Database.Beam.Sqlite.Test
+    Database.Beam.Sqlite.Test.Insert
+    Database.Beam.Sqlite.Test.Migrate
+    Database.Beam.Sqlite.Test.Select
+  default-language: Haskell2010
+  default-extensions:
+    DeriveAnyClass,
+    DeriveGeneric,
+    FlexibleContexts,
+    FlexibleInstances,
+    LambdaCase,
+    MultiParamTypeClasses,
+    OverloadedStrings,
+    RankNTypes,
+    ScopedTypeVariables,
+    StandaloneDeriving,
+    TypeApplications,
+    TypeFamilies
 
 flag werror
   description: Enable -Werror during development
@@ -60,5 +103,5 @@ flag werror
 
 source-repository head
   type: git
-  location: https://github.com/tathougies/beam.git
+  location: https://github.com/haskell-beam/beam.git
   subdir: beam-sqlite

@@ -27,9 +27,6 @@ import qualified Data.HashSet as HS
 import           Data.Hashable (Hashable)
 import           Data.Proxy
 import           Data.Text (Text)
-#if !MIN_VERSION_base(4, 11, 0)
-import           Data.Semigroup
-#endif
 
 -- *** Embedding extensions in databases
 
@@ -39,7 +36,7 @@ import           Data.Semigroup
 -- database,
 --
 -- @
--- import Database.Beam.Migrate.PgCrypto
+-- import Database.Beam.Postgres.PgCrypto
 --
 -- data MyDatabase entity
 --     = MyDatabase
