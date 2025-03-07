@@ -49,6 +49,7 @@ import Control.Monad.State
 
 import Data.Text (Text)
 import Data.Typeable
+import Data.Foldable
 import qualified Data.Kind as Kind (Constraint)
 
 import GHC.Types (Type)

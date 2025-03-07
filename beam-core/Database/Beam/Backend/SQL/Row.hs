@@ -39,6 +39,7 @@ import           Data.Proxy
 import           GHC.Generics
 import           GHC.Types (Type)
 import           GHC.TypeLits
+import           Control.Monad
 
 -- | The exact error encountered
 data ColumnParseError

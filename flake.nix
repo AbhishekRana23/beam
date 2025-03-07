@@ -14,7 +14,7 @@
       perSystem = { self', pkgs, lib, config, ... }: {
         haskellProjects.default = {
           projectFlakeName = "beam";
-          basePackages = pkgs.haskell.packages.ghc927;
+          basePackages = pkgs.haskell.packages.ghc98;
           autoWire = ["packages" "checks" "devShells" "apps"];
           settings = {
             pretty-simple = {

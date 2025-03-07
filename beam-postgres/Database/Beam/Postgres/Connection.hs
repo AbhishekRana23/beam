@@ -29,6 +29,7 @@ module Database.Beam.Postgres.Connection
 import           Control.Exception (SomeException(..), throwIO)
 import           Control.Monad.Free.Church
 import           Control.Monad.IO.Class
+import           Control.Monad
 
 import           Database.Beam hiding (runDelete, runUpdate, runInsert, insert)
 import           Database.Beam.Backend.SQL.BeamExtensions

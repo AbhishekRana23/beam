@@ -11,6 +11,7 @@ import Database.Beam.Migrate.Checks
 import Database.Beam.Migrate.Generics.Tables
 import Database.Beam.Migrate.Types.Predicates
 
+import Data.Monoid
 import Control.Applicative
 import Control.Monad.Writer
 import Control.Monad.Identity

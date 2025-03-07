@@ -53,10 +53,6 @@ newtype With be (db :: (Type -> Type) -> Type) a
                                 (State Int) a }
     deriving (Monad, Applicative, Functor)
 
-instance IsSql99RecursiveCommonTableExpressionSelectSyntax (BeamSqlBackendSelectSyntax be)
-    => MonadFix (With be db) where
-    mfix f = With (tell (Recursive, mempty) >> mfix (runWith . f))
-
 data QAnyScope
 
 -- | Query results that have been introduced into a common table

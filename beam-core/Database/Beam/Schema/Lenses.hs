@@ -131,3 +131,6 @@ dbLenses :: ( Generic (db (TableLens f db))
            => db (TableLens f db)
 dbLenses = fix $ \(_ :: db (TableLens f db)) ->
            to (gDatabaseLenses (\f (x :: db f) -> to <$> f (from x)) :: Rep (db (TableLens f db)) ())
+
+fix :: (a -> a) -> a
+fix f = let x = f x in x
