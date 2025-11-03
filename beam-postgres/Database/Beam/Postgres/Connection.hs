@@ -216,7 +216,7 @@ withPgDebug dbg conn (Pg action) =
                       columnCount = fromIntegral $ valuesNeeded (Proxy @Postgres) (Proxy @x)
                   resp <- Pg.queryWith_ (Pg.RP (put columnCount >> ask)) conn (Pg.Query query)
                   foldM runConsumer (PgStreamContinue nextStream) resp >>= finishUp
-           when (extime /= Nothing) $ dbg (decodeUtf8 query <> " Executed in: " <> T.pack (show (((sec $ fromJust extime) * 1000000000 + (nsec $ fromJust extime)) `div` 1000000)) <> " ms ")
+           when (extime /= Nothing) $ dbg (decodeUtf8 query <> " Executed in: " <> T.pack (show (((sec $ fromJust extime) * 1000 + (nsec $ fromJust extime)) `div` 1000000)) <> " ms ")
            when (extime == Nothing) $ dbg (decodeUtf8 query)
            return res
       step (PgRunReturning (PgCommandSyntax PgCommandTypeDataUpdateReturning syntax) mkProcess next) =
